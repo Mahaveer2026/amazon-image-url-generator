@@ -1,1 +1,1 @@
-console.log("Amazon Image URL Generator");
+console.log("Amazon Image Generator Loaded");

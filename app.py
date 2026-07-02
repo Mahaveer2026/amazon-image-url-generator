@@ -200,10 +200,10 @@ def upload():
             "message": "No images selected."
         }), 400
 
-    uploaded = []
-    failed = []
+uploaded = []
+failed = []
 
-  for file in files:
+for file in files:
     original_name = file.filename
 
     try:

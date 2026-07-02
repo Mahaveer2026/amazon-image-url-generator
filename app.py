@@ -233,12 +233,12 @@ def upload():
                 "url": url
             })
 
-        except HttpError as e:
-            logger.error("Google Drive API error for %s: %s", original_name, e)
-            failed.append({
-                "name": original_name,
-                "reason": "Google Drive API error. Please try again."
-            })
+        except Exception as e:
+    logger.exception(e)
+    failed.append({
+        "name": original_name,
+        "reason": str(e)
+    })
         except RuntimeError as e:
             # Configuration errors (missing creds/folder id) - same for every file,
             # so no point continuing the loop.

@@ -221,6 +221,89 @@ display:none;
 
 box-shadow:0 10px 25px rgba(0,0,0,.2);
 
+max-width:320px;
+
+font-weight:600;
+
+}
+
+/* Pre-upload selected-file preview cards */
+.preview-card{
+
+background:#fff;
+
+border-radius:14px;
+
+padding:10px;
+
+box-shadow:0 6px 18px rgba(0,0,0,.08);
+
+text-align:center;
+
+}
+
+.preview-card img{
+
+width:100%;
+
+height:110px;
+
+object-fit:cover;
+
+border-radius:10px;
+
+margin-bottom:8px;
+
+}
+
+.preview-name{
+
+font-size:12px;
+
+color:#4b5563;
+
+word-break:break-word;
+
+}
+
+.btn-remove-preview{
+
+position:absolute;
+
+top:14px;
+
+right:14px;
+
+background:#dc3545;
+
+color:#fff;
+
+border:none;
+
+border-radius:50%;
+
+width:26px;
+
+height:26px;
+
+font-size:12px;
+
+line-height:1;
+
+display:flex;
+
+align-items:center;
+
+justify-content:center;
+
+box-shadow:0 4px 10px rgba(0,0,0,.25);
+
+}
+
+.btn-remove-preview:hover{
+
+background:#bb2d3b;
+
 }
 
 .spinner{
@@ -377,6 +460,22 @@ height:140px;
 .progress{
 
 height:15px;
+
+}
+
+.preview-card img{
+
+height:90px;
+
+}
+
+.toast-message{
+
+left:16px;
+
+right:16px;
+
+max-width:none;
 
 }
 

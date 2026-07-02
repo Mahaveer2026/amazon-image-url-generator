@@ -206,7 +206,7 @@ def upload():
     for file in files:
         original_name = file.filename
 
-        try:
+                try:
             if not allowed_file(original_name):
                 failed.append({
                     "name": original_name,
@@ -234,26 +234,25 @@ def upload():
             })
 
         except Exception as e:
-    logger.exception(e)
-    failed.append({
-        "name": original_name,
-        "reason": str(e)
-    })
+            logger.exception(e)
+            failed.append({
+                "name": original_name,
+                "reason": str(e)
+            })
+
         except RuntimeError as e:
-            # Configuration errors (missing creds/folder id) - same for every file,
-            # so no point continuing the loop.
             logger.error("Configuration error: %s", e)
             return jsonify({
                 "success": False,
                 "message": str(e)
             }), 500
+
         except Exception as e:
-            logger.exception("Unexpected error uploading %s", original_name)
+            logger.exception(e)
             failed.append({
                 "name": original_name,
-                "reason": "Unexpected server error."
+                "reason": str(e)
             })
-
     if not uploaded and failed:
         return jsonify({
             "success": False,

@@ -203,56 +203,56 @@ def upload():
     uploaded = []
     failed = []
 
-    for file in files:
-        original_name = file.filename
+  for file in files:
+    original_name = file.filename
 
-                try:
-            if not allowed_file(original_name):
-                failed.append({
-                    "name": original_name,
-                    "reason": "Unsupported file type. Allowed: jpg, jpeg, png, webp."
-                })
-                continue
-
-            if get_file_size(file) > MAX_FILE_SIZE:
-                failed.append({
-                    "name": original_name,
-                    "reason": "File exceeds 20 MB limit."
-                })
-                continue
-
-            filename, url = upload_to_drive(file)
-
-            excel_data.append({
-                "Image Name": filename,
-                "Image URL": url
-            })
-
-            uploaded.append({
-                "name": filename,
-                "url": url
-            })
-
-        except Exception as e:
-            logger.exception(e)
+    try:
+        if not allowed_file(original_name):
             failed.append({
                 "name": original_name,
-                "reason": str(e)
+                "reason": "Unsupported file type. Allowed: jpg, jpeg, png, webp."
             })
+            continue
 
-        except RuntimeError as e:
-            logger.error("Configuration error: %s", e)
-            return jsonify({
-                "success": False,
-                "message": str(e)
-            }), 500
-
-        except Exception as e:
-            logger.exception(e)
+        if get_file_size(file) > MAX_FILE_SIZE:
             failed.append({
                 "name": original_name,
-                "reason": str(e)
+                "reason": "File exceeds 20 MB limit."
             })
+            continue
+
+        filename, url = upload_to_drive(file)
+
+        excel_data.append({
+            "Image Name": filename,
+            "Image URL": url
+        })
+
+        uploaded.append({
+            "name": filename,
+            "url": url
+        })
+
+    except HttpError as e:
+        logger.exception(e)
+        failed.append({
+            "name": original_name,
+            "reason": str(e)
+        })
+
+    except RuntimeError as e:
+        logger.error("Configuration error: %s", e)
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+    except Exception as e:
+        logger.exception(e)
+        failed.append({
+            "name": original_name,
+            "reason": str(e)
+        })
     if not uploaded and failed:
         return jsonify({
             "success": False,

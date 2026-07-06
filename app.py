@@ -1,320 +1,168 @@
-"""
-Amazon Image Link Generator
-----------------------------
-Flask backend that uploads images to Google Drive (Service Account),
-makes them public, and returns direct viewable image URLs.
-Also exports an Excel report of Image Name / Image URL.
-"""
-
-from flask import Flask, render_template, request, jsonify, send_file
-from werkzeug.utils import secure_filename
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseUpload
-
 import os
 import io
-import uuid
-import logging
-import pandas as pd
-from io import BytesIO
+import json
+from datetime import datetime
+from flask import Flask, request, jsonify, render_template, send_file
+from flask_cors import CORS
+from dotenv import load_dotenv
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# -------------------------------
-# APP INIT
-# -------------------------------
+load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
-# Limit total request size (20 MB per file * reasonable batch cap = 100 MB)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+SCOPES = ['https://www.googleapis.com/auth/drive']
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'svg'}
+FOLDER_NAME = 'Amazon-Product-Images'
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# -------------------------------
-# CONFIG
-# -------------------------------
-
-SCOPES = ["https://www.googleapis.com/auth/drive"]
-
-SERVICE_ACCOUNT_FILE = "/etc/secrets/google_credentials.json"
-
-FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB per image
-
-# In-memory store for the Excel export (Image Name / Image URL rows).
-# NOTE: resets on server restart / redeploy - fine for this lightweight tool.
-excel_data = []
-
-# -------------------------------
-# GOOGLE DRIVE SERVICE (lazy-loaded)
-# -------------------------------
-# We do NOT build the Drive client at import time. If the credentials file
-# or folder ID is missing, importing app.py (e.g. during local dev, testing,
-# or a bad deploy) would crash the whole app before Flask even starts.
-# Instead we build it lazily on first use and surface a clean JSON error.
-
-_drive_service = None
-
-
-def get_drive_service():
-    """Return a cached Google Drive API client, building it on first call."""
-    global _drive_service
-
-    if _drive_service is not None:
-        return _drive_service
-
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        raise RuntimeError(
-            f"Google service account file not found at {SERVICE_ACCOUNT_FILE}. "
-            "Make sure the secret file is mounted on the server."
-        )
-
-    if not FOLDER_ID:
-        raise RuntimeError(
-            "GOOGLE_DRIVE_FOLDER_ID environment variable is not set."
-        )
-
-    credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
-        scopes=SCOPES
-    )
-
-    _drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
-    return _drive_service
-
-
-# -------------------------------
-# HELPERS
-# -------------------------------
+MIME_MAP = {
+    'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+    'png': 'image/png', 'gif': 'image/gif',
+    'webp': 'image/webp', 'bmp': 'image/bmp',
+    'tiff': 'image/tiff', 'svg': 'image/svg+xml'
+}
 
 def allowed_file(filename):
-    """Check extension is one of the allowed image types."""
-    return (
-        "." in filename and
-        filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-    )
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def get_drive_service():
+    creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    else:
+        creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+    return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
-def get_file_size(file_storage):
-    """Determine file size in bytes without permanently losing the stream position."""
-    file_storage.stream.seek(0, os.SEEK_END)
-    size = file_storage.stream.tell()
-    file_storage.stream.seek(0)
-    return size
+def get_or_create_folder(service):
+    query = f"name='{FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    res = service.files().list(q=query, fields='files(id)').execute()
+    files = res.get('files', [])
+    if files:
+        return files[0]['id']
+    meta = {'name': FOLDER_NAME, 'mimeType': 'application/vnd.google-apps.folder'}
+    folder = service.files().create(body=meta, fields='id').execute()
+    fid = folder['id']
+    service.permissions().create(fileId=fid, body={'type': 'anyone', 'role': 'reader'}, fields='id').execute()
+    return fid
 
+def make_public(service, file_id):
+    service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}, fields='id').execute()
 
-def unique_filename(filename):
-    """
-    Auto-rename to avoid duplicate filenames on Drive.
-    Keeps the original name for readability and appends a short unique id.
-    """
-    name, ext = os.path.splitext(filename)
-    uid = uuid.uuid4().hex[:8]
-    return f"{name}_{uid}{ext}"
+def direct_url(file_id):
+    return f"https://lh3.googleusercontent.com/d/{file_id}"
 
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-# -------------------------------
-# GOOGLE DRIVE UPLOAD
-# -------------------------------
-
-def upload_to_drive(file_storage):
-    """
-    Upload a single werkzeug FileStorage object to Google Drive,
-    make it publicly readable, and return (filename, direct_url).
-    Raises exceptions on failure - caller is responsible for catching them.
-    """
-    service = get_drive_service()
-
-    filename = unique_filename(secure_filename(file_storage.filename))
-
-    file_storage.stream.seek(0)
-    file_bytes = file_storage.read()
-
-    media = MediaIoBaseUpload(
-        io.BytesIO(file_bytes),
-        mimetype=file_storage.content_type or "application/octet-stream",
-        resumable=False
-    )
-
-    metadata = {
-        "name": filename,
-        "parents": [FOLDER_ID]
-    }
-
-    uploaded = service.files().create(
-        body=metadata,
-        media_body=media,
-        fields="id"
-    ).execute()
-
-    file_id = uploaded["id"]
-
-    # Make the file publicly viewable
-    service.permissions().create(
-        fileId=file_id,
-        body={
-            "type": "anyone",
-            "role": "reader"
-        }
-    ).execute()
-
-    url = f"https://lh3.googleusercontent.com/d/{file_id}=s0"
-
-    return filename, url
-
-
-# -------------------------------
-# ROUTES
-# -------------------------------
-
-@app.route("/")
-def home():
-    """Render the dashboard UI."""
-    return render_template("index.html")
-
-
-@app.route("/upload", methods=["POST"])
-def upload():
-    """
-    Accepts one or more images under the 'images' form field,
-    uploads each to Google Drive, and returns JSON with per-file results.
-    Never lets one bad file kill the whole batch.
-    """
-    if "images" not in request.files:
-        return jsonify({
-            "success": False,
-            "message": "No images were submitted."
-        }), 400
-
-    files = request.files.getlist("images")
-    files = [f for f in files if f and f.filename != ""]
-
-    if not files:
-        return jsonify({
-            "success": False,
-            "message": "No images selected."
-        }), 400
-
-    uploaded = []
-    failed = []
-
+@app.route('/upload', methods=['POST'])
+def upload_images():
+    if 'images' not in request.files:
+        return jsonify({'error': 'No images provided'}), 400
+    files = request.files.getlist('images')
+    if not files or all(f.filename == '' for f in files):
+        return jsonify({'error': 'No files selected'}), 400
+    try:
+        service = get_drive_service()
+        folder_id = get_or_create_folder(service)
+    except Exception as e:
+        return jsonify({'error': f'Google Drive connection failed: {str(e)}'}), 500
+    results, errors = [], []
     for file in files:
-        original_name = file.filename
-
+        if file.filename == '':
+            continue
+        if not allowed_file(file.filename):
+            errors.append({'filename': file.filename, 'error': 'File type not supported'})
+            continue
         try:
-            if not allowed_file(original_name):
-                failed.append({
-                    "name": original_name,
-                    "reason": "Unsupported file type. Allowed: jpg, jpeg, png, webp."
-                })
-                continue
-
-            if get_file_size(file) > MAX_FILE_SIZE:
-                failed.append({
-                    "name": original_name,
-                    "reason": "File exceeds 20 MB limit."
-                })
-                continue
-
-            filename, url = upload_to_drive(file)
-
-            excel_data.append({
-                "Image Name": filename,
-                "Image URL": url
+            ext = file.filename.rsplit('.', 1)[1].lower()
+            mime = MIME_MAP.get(ext, 'image/jpeg')
+            data = file.read()
+            meta = {'name': file.filename, 'parents': [folder_id]}
+            media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
+            uploaded = service.files().create(body=meta, media_body=media, fields='id, name, size').execute()
+            fid = uploaded['id']
+            make_public(service, fid)
+            results.append({
+                'filename': file.filename,
+                'url': direct_url(fid),
+                'file_id': fid,
+                'size': int(uploaded.get('size', 0)),
+                'format': ext.upper(),
             })
-
-            uploaded.append({
-                "name": filename,
-                "url": url
-            })
-
-        except HttpError as e:
-            logger.exception(e)
-            failed.append({
-                "name": original_name,
-                "reason": str(e)
-            })
-
-        except RuntimeError as e:
-            logger.error("Configuration error: %s", e)
-            return jsonify({
-                "success": False,
-                "message": str(e)
-            }), 500
-
         except Exception as e:
-            logger.exception(e)
-            failed.append({
-                "name": original_name,
-                "reason": str(e)
-            })
-    if not uploaded and failed:
-        return jsonify({
-            "success": False,
-            "message": "All uploads failed.",
-            "files": [],
-            "failed": failed
-        }), 502
+            errors.append({'filename': file.filename, 'error': str(e)})
+    return jsonify({'success': results, 'errors': errors})
 
-    return jsonify({
-        "success": True,
-        "files": uploaded,
-        "failed": failed
-    })
+@app.route('/export-excel', methods=['POST'])
+def export_excel():
+    data = request.json
+    if not data or not data.get('images'):
+        return jsonify({'error': 'No data provided'}), 400
+    images = data['images']
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Amazon Image URLs'
+    ORANGE, YELLOW, NAVY, WHITE, GREY = 'FF6B2B', 'FEBD69', '0F1923', 'FFFFFF', 'F8F9FB'
+    thin = Side(style='thin', color='E0E0E0')
+    bd = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ws.merge_cells('A1:D1')
+    t = ws['A1']
+    t.value = f'Amazon Product Image URLs  —  {datetime.now().strftime("%B %d, %Y  %H:%M")}'
+    t.font = Font(name='Calibri', bold=True, size=13, color=WHITE)
+    t.fill = PatternFill(start_color=NAVY, end_color=NAVY, fill_type='solid')
+    t.alignment = Alignment(horizontal='left', vertical='center', indent=2)
+    ws.row_dimensions[1].height = 32
+    ws.merge_cells('A2:D2')
+    s = ws['A2']
+    s.value = f'{len(images)} image(s)  —  Ready for Amazon Seller Central bulk import'
+    s.font = Font(name='Calibri', size=10, italic=True, color='555555')
+    s.fill = PatternFill(start_color=YELLOW, end_color=YELLOW, fill_type='solid')
+    s.alignment = Alignment(horizontal='left', vertical='center', indent=2)
+    ws.row_dimensions[2].height = 22
+    for i, (h, w, l) in enumerate(zip(['#', 'Image Name', 'Image URL (Direct)', 'Format'], [5, 38, 90, 10], ['A', 'B', 'C', 'D']), 1):
+        c = ws.cell(row=3, column=i, value=h)
+        c.font = Font(name='Calibri', bold=True, size=11, color=WHITE)
+        c.fill = PatternFill(start_color=ORANGE, end_color=ORANGE, fill_type='solid')
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        c.border = bd
+        ws.column_dimensions[l].width = w
+    ws.row_dimensions[3].height = 26
+    for idx, img in enumerate(images, 1):
+        r = idx + 3
+        fc = GREY if idx % 2 == 0 else WHITE
+        rf = PatternFill(start_color=fc, end_color=fc, fill_type='solid')
+        c1 = ws.cell(row=r, column=1, value=idx)
+        c1.font = Font(name='Calibri', size=10, color='888888')
+        c1.fill = rf; c1.alignment = Alignment(horizontal='center', vertical='center'); c1.border = bd
+        c2 = ws.cell(row=r, column=2, value=img.get('filename', ''))
+        c2.font = Font(name='Calibri', size=10, bold=True)
+        c2.fill = rf; c2.alignment = Alignment(horizontal='left', vertical='center', indent=1); c2.border = bd
+        url = img.get('url', '')
+        c3 = ws.cell(row=r, column=3, value=url)
+        c3.hyperlink = url
+        c3.font = Font(name='Calibri', size=10, color='0563C1', underline='single')
+        c3.fill = rf; c3.alignment = Alignment(horizontal='left', vertical='center', indent=1); c3.border = bd
+        c4 = ws.cell(row=r, column=4, value=img.get('format', ''))
+        c4.font = Font(name='Calibri', size=10, color='444444')
+        c4.fill = rf; c4.alignment = Alignment(horizontal='center', vertical='center'); c4.border = bd
+        ws.row_dimensions[r].height = 20
+    output = io.BytesIO()
+    wb.save(output); output.seek(0)
+    fname = f'amazon_image_urls_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+    return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=fname)
 
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok'})
 
-@app.route("/download")
-def download():
-    """Generate and stream amazon_image_links.xlsx containing all uploads so far."""
-    if len(excel_data) == 0:
-        return jsonify({
-            "success": False,
-            "message": "No uploaded images yet. Upload images first."
-        }), 404
-
-    df = pd.DataFrame(excel_data, columns=["Image Name", "Image URL"])
-
-    output = BytesIO()
-    df.to_excel(output, index=False, sheet_name="Images")
-    output.seek(0)
-
-    return send_file(
-        output,
-        download_name="amazon_image_links.xlsx",
-        as_attachment=True,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-
-@app.errorhandler(413)
-def file_too_large(e):
-    return jsonify({
-        "success": False,
-        "message": "Upload too large. Please upload smaller or fewer files."
-    }), 413
-
-
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({
-        "success": False,
-        "message": "Route not found."
-    }), 404
-
-
-@app.errorhandler(500)
-def server_error(e):
-    logger.exception("Internal server error")
-    return jsonify({
-        "success": False,
-        "message": "Internal server error."
-    }), 500
-
-
-if __name__ == "__main__":
-    app.run(debug=True)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_ENV') == 'development')

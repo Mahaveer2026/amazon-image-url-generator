@@ -1,13 +1,12 @@
 import os
 import io
 import json
+import base64
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -17,49 +16,27 @@ app = Flask(__name__)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
-# Must include drive.file scope to write to user folders
-SCOPES = [
-    'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/drive.file'
-]
-
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'svg'}
-
-MIME_MAP = {
-    'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-    'png': 'image/png', 'gif': 'image/gif',
-    'webp': 'image/webp', 'bmp': 'image/bmp',
-    'tiff': 'image/tiff', 'svg': 'image/svg+xml'
-}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_drive_service():
-    secret_file = '/etc/secrets/google_credentials.json'
-    creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
-    if creds_json:
-        creds_dict = json.loads(creds_json)
-        creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    elif os.path.exists(secret_file):
-        creds = service_account.Credentials.from_service_account_file(secret_file, scopes=SCOPES)
+def upload_to_imgbb(file_data, filename):
+    api_key = os.getenv('IMGBB_API_KEY', '00425464bddb3195e439a8bfe3e0fed1')
+    encoded = base64.b64encode(file_data).decode('utf-8')
+    response = requests.post(
+        'https://api.imgbb.com/1/upload',
+        data={
+            'key': api_key,
+            'image': encoded,
+            'name': filename,
+        }
+    )
+    result = response.json()
+    if result.get('success'):
+        return result['data']['url']
     else:
-        creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-    return build('drive', 'v3', credentials=creds, cache_discovery=False)
-
-def make_public(service, file_id):
-    try:
-        service.permissions().create(
-            fileId=file_id,
-            body={'type': 'anyone', 'role': 'reader'},
-            supportsAllDrives=True,
-            fields='id'
-        ).execute()
-    except Exception:
-        pass
-
-def direct_url(file_id):
-    return f"https://lh3.googleusercontent.com/d/{file_id}"
+        raise Exception(result.get('error', {}).get('message', 'Upload failed'))
 
 @app.route('/')
 def index():
@@ -74,14 +51,6 @@ def upload_images():
     if not files or all(f.filename == '' for f in files):
         return jsonify({'error': 'No files selected'}), 400
 
-    try:
-        service = get_drive_service()
-    except Exception as e:
-        return jsonify({'error': f'Google Drive connection failed: {str(e)}'}), 500
-
-    # Get folder ID from env variable
-    folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID', '1yLUAG4OrJq_GLzlsL-aDRmrymCtQ020y')
-
     results, errors = [], []
 
     for file in files:
@@ -93,31 +62,13 @@ def upload_images():
 
         try:
             ext = file.filename.rsplit('.', 1)[1].lower()
-            mime = MIME_MAP.get(ext, 'image/jpeg')
             data = file.read()
-
-            # Build file metadata
-            meta = {'name': file.filename}
-            if folder_id:
-                meta['parents'] = [folder_id]
-
-            media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
-
-            uploaded = service.files().create(
-                body=meta,
-                media_body=media,
-                fields='id, name, size',
-                supportsAllDrives=True
-            ).execute()
-
-            fid = uploaded['id']
-            make_public(service, fid)
+            url = upload_to_imgbb(data, file.filename)
 
             results.append({
                 'filename': file.filename,
-                'url': direct_url(fid),
-                'file_id': fid,
-                'size': int(uploaded.get('size', 0)),
+                'url': url,
+                'size': len(data),
                 'format': ext.upper(),
             })
 
@@ -158,7 +109,7 @@ def export_excel():
     ws.row_dimensions[2].height = 22
 
     for i, (h, w, l) in enumerate(zip(
-        ['#', 'Image Name', 'Image URL (Direct)', 'Format'],
+        ['#', 'Image Name', 'Image URL', 'Format'],
         [5, 38, 90, 10],
         ['A', 'B', 'C', 'D']
     ), 1):

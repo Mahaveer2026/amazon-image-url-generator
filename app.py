@@ -93,7 +93,12 @@ def upload_images():
             data = file.read()
             meta = {'name': file.filename, 'parents': [folder_id]}
             media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
-            uploaded = service.files().create(body=meta, media_body=media, fields='id, name, size').execute()
+            uploaded = service.files().create(
+    body=meta,
+    media_body=media,
+    fields='id, name, size',
+    supportsAllDrives=True
+).execute()
             fid = uploaded['id']
             make_public(service, fid)
             results.append({

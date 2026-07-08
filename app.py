@@ -44,6 +44,9 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
 def get_or_create_folder(service):
+    folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+    if folder_id:
+        return folder_id
     query = f"name='{FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
     res = service.files().list(q=query, fields='files(id)').execute()
     files = res.get('files', [])

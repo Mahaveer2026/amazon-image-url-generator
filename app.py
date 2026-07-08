@@ -80,7 +80,7 @@ def upload_images():
         return jsonify({'error': f'Google Drive connection failed: {str(e)}'}), 500
 
     # Get folder ID from env variable
-    folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID')
+    folder_id = os.getenv('GOOGLE_DRIVE_FOLDER_ID', '1yLUAG4OrJq_GLzlsL-aDRmrymCtQ020y')
 
     results, errors = [], []
 

@@ -32,10 +32,13 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def get_drive_service():
+    secret_file = '/etc/secrets/google_credentials.json'
     creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
     if creds_json:
         creds_dict = json.loads(creds_json)
         creds = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    elif os.path.exists(secret_file):
+        creds = service_account.Credentials.from_service_account_file(secret_file, scopes=SCOPES)
     else:
         creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
